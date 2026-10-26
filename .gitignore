@@ -12,6 +12,8 @@ npm-debug.log*
 run.log
 server.log
 .venv/
+__pycache__/
+*.pyc
 notebooks/
 tunnel.url
 start-stock.sh

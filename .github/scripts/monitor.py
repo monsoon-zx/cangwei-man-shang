@@ -38,6 +38,8 @@ MIN_POOL = 100              # 股票池少于 100 只告警（正常 200）
 MIN_KLINES = 10000          # K线少于 1 万条告警（正常 ~12.4 万）
 SYNC_WINDOW_START = "15:30"  # 北京时间收盘同步窗口，窗口内跳过新鲜度检查
 SYNC_WINDOW_END = "18:00"
+COVERAGE_SAMPLES = 8        # 覆盖度抽样只数
+COVERAGE_BAD_RATIO = 0.4    # 抽样中落后于全库最新日期的比例超过此值 → 判为覆盖不足
 # -------------------------
 
 # A股法定休市日（备用判据；主判据是上证指数行情时间戳，故本表只在下述情况生效：
@@ -123,6 +125,51 @@ def fetch_version():
 def fetch_health():
     status, data = http_json(f"{BASE_URL}/api/monitor/health", timeout=120)
     return data
+
+
+def _norm_date(d):
+    """'20261026' 或 '2026-10-26' → '20261026'，便于跨格式比较"""
+    return str(d).replace("-", "") if d else None
+
+
+def kline_coverage_probe(global_latest):
+    """抽样池内个股，检查各自最新 K 线日期是否等于全库最新日期。
+
+    为什么需要这一步：/api/monitor/health 的新鲜度用**全库** `MAX(trade_date)`
+    判断，只要**任意一只**股票被写入，全局就显示「新鲜」。实测 full-pipeline
+    一轮只推进 9/200 只（服务端用全局 MAX 判断，第一只写进去后就转去算指标），
+    此时监控全绿而 191 只个股仍是几天前的数据——这就是历史「假绿」的来源。
+
+    抽样对比可以直接识别「只有少数股票被更新」。判据不依赖交易日历：不比对
+    「今天」，只比对「全库最领先的那只」，所以周末/长假都不会误报。
+
+    返回 (样本数, 落后样本 [(code, latest), ...])
+    """
+    try:
+        _, data = http_json(f"{BASE_URL}/api/stock-pool", timeout=120)
+    except Exception as e:
+        print(f"ℹ️ 覆盖度抽样跳过（股票池接口不可用: {type(e).__name__}）")
+        return 0, []
+
+    codes = sorted({s.get("code") for s in data.get("stocks", []) if s.get("code")})
+    if not codes:
+        return 0, []
+
+    step = max(1, len(codes) // COVERAGE_SAMPLES)
+    sample = codes[::step][:COVERAGE_SAMPLES]
+
+    target = _norm_date(global_latest)
+    stale = []
+    for code in sample:
+        try:
+            _, d = http_json(f"{BASE_URL}/api/stocks/{code}", timeout=90)
+            ks = d.get("klines") or []
+            latest = _norm_date(ks[-1].get("date")) if ks else None
+            if latest and latest != target:
+                stale.append((code, ks[-1].get("date")))
+        except Exception as e:
+            print(f"ℹ️ 覆盖度抽样 {code} 失败: {type(e).__name__}")
+    return len(sample), stale
 
 
 def run_gh(args):
@@ -232,6 +279,19 @@ def main():
                     problems.append((f"{name}数据过期", f"最新 {latest}，期望 {f.get('expected')}，落后 {diff} 天"))
             print(f"ℹ️ 新鲜度: K线 {f.get('kline_diff_days')}天 / 评分 {f.get('score_diff_days')}天")
 
+        # 3b. 覆盖度抽样：全库 MAX(trade_date) 新鲜 ≠ 个股都新鲜（见 kline_coverage_probe）
+        #     仅在「全库已判定新鲜」时才有假绿风险；全库陈旧时上面的数据过期已覆盖。
+        if trading and trading_confirmed and not in_sync_window() \
+                and f.get("kline_diff_days") == 0:
+            n, stale = kline_coverage_probe(f.get("kline_latest"))
+            if n:
+                print(f"ℹ️ 覆盖度抽样: {n} 只中 {len(stale)} 只落后于全库最新 {f.get('kline_latest')}")
+                if len(stale) / n > COVERAGE_BAD_RATIO:
+                    eg = ", ".join(f"{c}({d})" for c, d in stale[:3])
+                    problems.append(("K线覆盖不足",
+                                     f"抽样 {n} 只中 {len(stale)} 只落后于全库最新 "
+                                     f"{f.get('kline_latest')}，示例 {eg}"))
+
         # 4. 数据完整性
         if db.get("pool", 0) < MIN_POOL:
             problems.append(("股票池不足", f"pool={db.get('pool')}（阈值 {MIN_POOL}）"))
@@ -266,8 +326,10 @@ def main():
         # 交易日判定不确定时（行情接口不可达）从宽处理，不因判定失败而误报红色。
         fatal = [p for p in problems if p[0] in FATAL_PROBLEMS]
         if not fatal:
+            # 「数据过期」与「覆盖不足」都是确凿的同步故障：前者是全库没跟上，
+            # 后者是全库看着新鲜但个股大面积没跟上（假绿），两者都值得染红。
             fatal = [p for p in problems if trading and trading_confirmed
-                     and "数据过期" in p[0]]
+                     and ("数据过期" in p[0] or p[0] == "K线覆盖不足")]
         if fatal:
             print(f"❌ 致命问题 {len(fatal)} 个，workflow 标记失败: {[p[0] for p in fatal]}")
             sys.exit(1)
