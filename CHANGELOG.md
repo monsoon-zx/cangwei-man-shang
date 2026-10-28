@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.9.4 (2026-10-28)
+
+### ⏳ 待入库：Data Sync 工作流（`.github/workflows/sync.yml`）
+- 文件已写好但**受凭证权限阻塞，尚未推送**：本机钥匙串里的 PAT 缺 `workflow` scope，GitHub 拒绝任何对 `.github/workflows/` 的写入
+  （`refusing to allow a Personal Access Token to create or update workflow ... without workflow scope`）
+- **这很可能就是它一直没上线的真正原因**：提交 `f735d2f` 推了驱动脚本 `.github/scripts/sync_pipeline.py`，而 workflow 文件在 push 时被拒，遂留在本地未跟踪
+- 内容：北京 15:40（收盘后主同步）+ 17:10（兜底补跑）驱动 `POST /api/sync/step?step=kline`；手动 `workflow_dispatch` 可选 `phase` / `force`
+- 解除条件：给 PAT 补 `workflow` scope 后推送，或在 GitHub 网页直接新建该文件
+
+### 🔍 背景：线上 K 线自 10-26 起停更
+- 远端仓库只有 `Service Monitor` 一个工作流，外部同步驱动不存在，K 线只能靠 Render 上不可靠的 node-cron 零星推进
+- 实测池内 200 只中 **198 只停在 `20261026`，仅 2 只到 `20261027`**，而全库 `MAX(trade_date)` 已被那 2 只顶到 10-27 → 健康接口显示"新鲜"，monitor 的覆盖度抽检报「K线覆盖不足」把 workflow 染红
+
+### 🐛 修复：监控报警内容丢失
+- `monitor.py` 新增「健康时自动关闭遗留 Issue」。原逻辑只建 Issue 从不关闭，9-28 那个 Issue 一直挂着，导致之后所有新异常都被标题去重挡掉，只剩无信息量的 workflow 红叉
+
+### 🐛 修复：健康接口两个恒错字段
+- `/api/monitor/health` 的 `crowding_latest` 恒为 null（`dates` 对象只查了 kline/score，漏了 `crowding_score`）→ 拥挤度新鲜度维度永久失明
+- `sync.running` 恒为 true（`stepSyncState` 初始 `done:false`，`0/0` 被当成"正在跑"）→ 改为 `total===0` 也算 idle
+
+---
+
 ## v1.9.2 (2026-09-14)
 
 ### 🔒 仓库治理

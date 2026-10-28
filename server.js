@@ -1143,9 +1143,13 @@ app.get('/api/monitor/health', async (req, res) => {
       scores: Number((await dbGet('SELECT COUNT(DISTINCT code) as c FROM stock_score'))?.c || 0),
       finance: Number((await dbGet('SELECT COUNT(DISTINCT code) as c FROM financial_indicator'))?.c || 0),
     };
+    // crowding_score 表在早期环境可能不存在，查不到就当缺失，不让整个 health 接口 500
+    let crowdingLatest = null;
+    try { crowdingLatest = (await dbGet('SELECT MAX(trade_date) as d FROM crowding_score'))?.d || null; } catch(e) {}
     const dates = {
       kline: (await dbGet('SELECT MAX(trade_date) as d FROM daily_kline'))?.d || null,
       score: (await dbGet('SELECT MAX(trade_date) as d FROM stock_score'))?.d || null,
+      crowding: crowdingLatest,
     };
     // 期望最新交易日（按北京时间，Render 服务器为 UTC）：周六日→上周五；工作日15点前→昨天；15点后→今天
     const bj = dayjs().add(8, 'hour');
@@ -1176,10 +1180,13 @@ app.get('/api/monitor/health', async (req, res) => {
       };
     }
     // 同步状态（内存进度，suspend 后可能非 idle）
+    // total=0 表示这一轮从未启动（进程重启后 stepSyncState 归零），不能算「正在跑」，
+    // 否则每次冷启动后 health 都报 running=true（Issue #4 就是这么来的）
+    const stepStatus = (s) => (s.done || s.total === 0) ? 'idle' : `${s.offset}/${s.total}`;
     const sync = {
-      kline: stepSyncState.kline.done ? 'idle' : `${stepSyncState.kline.offset}/${stepSyncState.kline.total}`,
-      indicators: stepSyncState.indicators.done ? 'idle' : `${stepSyncState.indicators.offset}/${stepSyncState.indicators.total}`,
-      finance: stepSyncState.finance.done ? 'idle' : `${stepSyncState.finance.offset}/${stepSyncState.finance.total}`,
+      kline: stepStatus(stepSyncState.kline),
+      indicators: stepStatus(stepSyncState.indicators),
+      finance: stepStatus(stepSyncState.finance),
     };
     let version = 'unknown';
     try { version = fs.readFileSync(path.join(__dirname, 'VERSION'), 'utf8').trim(); } catch (e) {}

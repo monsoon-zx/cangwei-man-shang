@@ -11,6 +11,11 @@
 
 报警方式：发现问题时用 gh 创建 GitHub Issue（标题固定去重，已有 open Issue 则跳过）
 
+Issue 生命周期（2026-10-28 修复）
+  原逻辑只会「建 Issue」，从不关闭。9-28 那个 Issue 一直挂着，导致之后**所有新异常
+  都不再建 Issue**（标题去重命中），报警内容彻底丢失，只能靠 workflow 红叉猜。
+  现改为：检查全项健康时自动 close 遗留的同标题 open Issue 并留评论。
+
 交易日感知（2026-10-08 修复）
   原逻辑用「最近工作日 Mon–Fri」推期望日期，不认中国法定节假日。长假期间 K线停在节前
   最后一个交易日不动，期望日期却一天天往前推，越过 FRESHNESS_ALERT_DAYS 后每小时误报，
@@ -203,6 +208,41 @@ def create_issue(body):
         print(f"❌ 创建 Issue 失败: {r.stderr.strip()}")
 
 
+def close_stale_issue():
+    """全项健康时关闭遗留的 open Issue
+
+    不关的后果：`open_issue_exists()` 命中旧 Issue → 后续异常不再建 Issue →
+    报警内容全部丢失，只剩一个无信息量的红叉。
+    """
+    r = run_gh(["issue", "list", "--state", "open", "--search", f'"{ISSUE_TITLE}"',
+                "--limit", "10", "--json", "number,title"])
+    if r is None:
+        return
+    if r.returncode != 0:
+        print(f"⚠️ 查询 Issue 失败，跳过自动关闭: {r.stderr.strip()}")
+        return
+    try:
+        items = json.loads(r.stdout or "[]")
+    except ValueError:
+        print("⚠️ Issue 列表解析失败，跳过自动关闭")
+        return
+    closed = 0
+    for it in items:
+        if it.get("title") != ISSUE_TITLE:
+            continue
+        num = it.get("number")
+        cr = run_gh(["issue", "close", str(num), "--comment",
+                     f"✅ 监控已恢复：{beijing_now().strftime('%Y-%m-%d %H:%M')} "
+                     f"(北京时间) 全项健康，由监控任务自动关闭。"])
+        if cr is not None and cr.returncode == 0:
+            print(f"✅ 已自动关闭遗留 Issue #{num}")
+            closed += 1
+        elif cr is not None:
+            print(f"❌ 关闭 Issue #{num} 失败: {cr.stderr.strip()}")
+    if closed == 0:
+        print("ℹ️ 无遗留 open Issue 需要关闭")
+
+
 def build_body(problems, health, version, checked_at):
     lines = [f"## ⚠️ 线上服务健康异常", "", f"**检查时间**: {checked_at} (北京时间)", f"**服务版本**: {version}", ""]
     lines.append("### 发现问题")
@@ -337,6 +377,7 @@ def main():
         sys.exit(0)
     else:
         print("✅ 全部健康")
+        close_stale_issue()
         sys.exit(0)
 
 
