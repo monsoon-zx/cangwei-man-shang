@@ -344,14 +344,31 @@ def run_gh(args):
         return None
 
 
-def open_issue_exists():
-    r = run_gh(["issue", "list", "--state", "open", "--search", f'"{ISSUE_TITLE}"', "--limit", "10"])
+def list_issues(state="open"):
+    """列出 Issue（number/title）→ list；失败返回 None
+
+    不用 `--search`：中文标题经 GitHub 全文检索分词后可能命中不了，
+    后果一个是该关的报警关不掉、另一个更糟 —— `open_issue_exists()` 判成不存在，
+    每次巡检都重复建 Issue 刷屏。本仓库 Issue 总量个位数，直接列全量再精确匹配最稳。
+    """
+    r = run_gh(["issue", "list", "--state", state, "--limit", "100", "--json", "number,title,body"])
     if r is None:
-        return False
+        return None
     if r.returncode != 0:
         print(f"⚠️ 查询 Issue 失败: {r.stderr.strip()}")
-        return False
-    return ISSUE_TITLE in r.stdout
+        return None
+    try:
+        return json.loads(r.stdout or "[]")
+    except ValueError:
+        print("⚠️ Issue 列表解析失败")
+        return None
+
+
+def open_issue_exists():
+    items = list_issues("open")
+    if items is None:
+        return False        # 查不到就当不存在：多建一次报警好过漏报
+    return any(it.get("title") == ISSUE_TITLE for it in items)
 
 
 def create_issue(body):
@@ -372,17 +389,8 @@ def close_stale_issue():
     不关的后果：`open_issue_exists()` 命中旧 Issue → 后续异常不再建 Issue →
     报警内容全部丢失，只剩一个无信息量的红叉。
     """
-    r = run_gh(["issue", "list", "--state", "open", "--search", f'"{ISSUE_TITLE}"',
-                "--limit", "10", "--json", "number,title"])
-    if r is None:
-        return
-    if r.returncode != 0:
-        print(f"⚠️ 查询 Issue 失败，跳过自动关闭: {r.stderr.strip()}")
-        return
-    try:
-        items = json.loads(r.stdout or "[]")
-    except ValueError:
-        print("⚠️ Issue 列表解析失败，跳过自动关闭")
+    items = list_issues("open")
+    if items is None:
         return
     closed = 0
     for it in items:
@@ -406,19 +414,9 @@ def read_heartbeat():
 
     任何读取失败都返回 (None, None)，调用方据此按「已到期」处理：
     宁可多巡检一次，也不能因为状态读不到而永久失明。
-
-    这里刻意不用 `--search` 而直接列全部（本仓库 Issue 总量个位数）：GitHub 的
-    全文检索对无空格中文标题的分词不可靠，一旦搜不到就会每次重建心跳 Issue 刷屏。
     """
-    r = run_gh(["issue", "list", "--state", "all", "--limit", "100",
-                "--json", "number,title,body"])
-    if r is None or r.returncode != 0:
-        print(f"ℹ️ 读取巡检心跳失败，按已到期处理"
-              f"（{('gh 不可用' if r is None else r.stderr.strip())}）")
-        return None, None
-    try:
-        items = json.loads(r.stdout or "[]")
-    except ValueError:
+    items = list_issues("all")
+    if items is None:
         return None, None
     for it in items:
         if it.get("title") != HEARTBEAT_TITLE:
