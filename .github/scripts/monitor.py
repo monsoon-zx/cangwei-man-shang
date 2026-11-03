@@ -11,6 +11,11 @@
 
 报警方式：发现问题时用 gh 创建 GitHub Issue（标题固定去重，已有 open Issue 则跳过）
 
+巡检频率（2026-11-03 v1.9.6）
+  workflow 本身仍是每小时触发，但脚本内部按 REPORT_HOURS（北京 04/16 点）节流：
+  只有这两个小时才做完整的健康巡检 + Issue 判定/关闭；其余整点只跑「自愈补 K 线」
+  （静默，零噪音）。原因与代价见 REPORT_HOURS 处注释。
+
 Issue 生命周期（2026-10-28 修复）
   原逻辑只会「建 Issue」，从不关闭。9-28 那个 Issue 一直挂着，导致之后**所有新异常
   都不再建 Issue**（标题去重命中），报警内容彻底丢失，只能靠 workflow 红叉猜。
@@ -70,6 +75,17 @@ AUTOSYNC_START = "15:05"     # 北京，15:00 收盘后留 5 分钟给数据落�
 AUTOSYNC_END = "22:00"       # 超过此点不补当天，避免把隔夜数据算错
 AUTOSYNC_BUDGET_MIN = 30     # 单轮总时长预算（Actions job 默认 360 分钟，留足余量）
 AUTOSYNC_DISABLE = os.environ.get("AUTOSYNC_DISABLE") == "1"
+
+# ---- 巡检节流（2026-11-03，v1.9.6）----
+# 用户要求「每 12 小时跑一次」。但 monitor.yml 在 .github/workflows/ 下，当前 PAT
+# 只有 `repo` scope、推不动 workflow 文件（API 返回 404），所以改在脚本内部节流。
+# 两条通道分开处理，各取所需：
+#   · 自愈同步（补 K 线）→ **仍然每小时尝试**。它只写 Actions 日志、不建 Issue、不染红，
+#     零噪音；而补数越早越好、窗口内多重试几次成功率明显更高。压到 12 小时反而
+#     会让「16:00 补失败 → 等次日」成为单点故障。
+#   · 健康巡检 + Issue 判定/关闭 → 只在 REPORT_HOURS（北京）执行，即每 12 小时。
+# 代价（已告知用户）：服务挂掉的发现延迟从 1 小时延长到最长 12 小时。
+REPORT_HOURS = (4, 16)      # 北京 04:00 / 16:00；16:00 紧跟自愈窗口，补完立刻复核
 
 
 def beijing_now():
@@ -402,7 +418,7 @@ def build_body(problems, health, version, checked_at):
         lines.append(f"| {k} | {v} |")
     lines.append("")
     lines.append("---")
-    lines.append("_此 Issue 由监控任务每小时自动检查创建，修复后请手动关闭；持续异常时不会重复创建。_")
+    lines.append("_此 Issue 由监控任务自动巡检创建（每 12 小时，北京 04:00 / 16:00），修复后请手动关闭；持续异常时不会重复创建。_")
     return "\n".join(lines)
 
 
@@ -412,6 +428,7 @@ def main():
     version = "unknown"
     trading = True          # 供退出码判断：非交易日的数据陈旧不算故障
     trading_confirmed = True
+    heal = None             # 自愈三态：None=未尝试 / "ok" / "fail"
     heal_failed = False     # 自愈尝试过但没补上（按配置只留日志，不报警）
     stale_notes = []        # 数据新鲜度备注：不进 problems（不建 Issue），但阻止误报「全健康」
 
@@ -459,6 +476,12 @@ def main():
               f"{'' if trading_confirmed else ' [判定不确定]'}")
         if in_sync_window():
             print("ℹ️ 同步窗口内，跳过新鲜度检查")
+            # 但「跳过检查」不能等于「假定健康」：同步窗口内若数据仍落后且自愈没成功，
+            # 必须留一条 note，否则会走「全健康 → 自动关闭 Issue」把 #7 误关（假绿）。
+            kd = f.get("kline_diff_days")
+            if kd is not None and kd >= 1 and heal != "ok":
+                stale_notes.append(f"K线落后 {kd} 天（同步窗口内，未复核）")
+                print(f"⚠️ 同步窗口内 K线仍落后 {kd} 天且自愈未成功，保留 Issue 不自动关闭")
         elif not trading:
             print(f"ℹ️ 非交易日（{why}），跳过新鲜度检查")
         else:
@@ -516,6 +539,16 @@ def main():
         print(f"ℹ️ 同步: {health.get('sync')}")
 
     # 6. 报警
+    # 节流闸门：非巡检小时只做自愈，不改动 Issue、不染红（见文件头 REPORT_HOURS 说明）。
+    # 检查逻辑全部照跑，日志照留 —— 想看细节随时翻 Actions，只是不产生任何对外噪音。
+    now_bj = beijing_now()
+    if now_bj.hour not in REPORT_HOURS:
+        print(f"ℹ️ 非巡检小时（北京 {now_bj:%H:%M}），仅执行自愈；"
+              f"完整巡检在每 {sorted(REPORT_HOURS)[0]} 点和 {sorted(REPORT_HOURS)[1]} 点（北京）")
+        if problems or stale_notes:
+            print(f"ℹ️ 本次观察（按配置不报警）：问题={[p[0] for p in problems]} 备注={stale_notes}")
+        sys.exit(0)
+
     if problems:
         print(f"⚠️ 发现 {len(problems)} 个问题，尝试创建 Issue...")
         if not open_issue_exists():
