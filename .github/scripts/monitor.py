@@ -17,6 +17,13 @@
   「自愈补 K 线」（静默，零噪音）。**发现异常则改为 1 小时复查**，好在修好后尽快
   自动关闭遗留 Issue。为什么不用固定小时、状态存在哪，见该常量处注释。
 
+补数时机（2026-11-03 v1.9.6，实测教训）
+  东财当日日线**不是收盘即出**，实测 15:05~15:20 拉到的最后一根还是 T-1，200 只全部
+  只到昨天，白跑一轮；15:40 再拉已有 T 日。所以自愈窗口起点从 15:05 挪到 15:35。
+  同一现象还有个副作用：先拿到 T 日的少数几只把**全库 MAX** 顶到 T 日，于是
+  `kline_diff_days` 变 0、看起来「不用补」，其余 190+ 只却仍停在 T-1。
+  为此自愈触发条件加了「覆盖抽样」：全局新鲜但多数个股落后于最领先那只 → 也算没补完。
+
 Issue 生命周期（2026-10-28 修复）
   原逻辑只会「建 Issue」，从不关闭。9-28 那个 Issue 一直挂着，导致之后**所有新异常
   都不再建 Issue**（标题去重命中），报警内容彻底丢失，只能靠 workflow 红叉猜。
@@ -72,7 +79,9 @@ FATAL_PROBLEMS = {"服务不可用", "监控接口异常"}
 #   Render 免费实例的 node-cron 又随休眠失效（crowding 停更 66 天为证）。而
 #   monitor.py 在 .github/scripts/ 下、属普通文件，可正常更新，且 monitor.yml
 #   已经每小时触发它 —— 直接复用这条已验证可靠的调度。
-AUTOSYNC_START = "15:05"     # 北京，15:00 收盘后留 5 分钟给数据落定
+AUTOSYNC_START = "15:35"     # 北京。**不能再早**：实测东财当日日线在 15:30 之后才逐步
+                             # 落地，15:05 开跑拉到的最后一根还是 T-1（200 只全部只到昨天），
+                             # 白跑一轮还留下「全库 MAX 新鲜、个股全落后」的假绿。15:00 收盘够等了。
 AUTOSYNC_END = "22:00"       # 超过此点不补当天，避免把隔夜数据算错
 AUTOSYNC_BUDGET_MIN = 30     # 单轮总时长预算（Actions job 默认 360 分钟，留足余量）
 AUTOSYNC_DISABLE = os.environ.get("AUTOSYNC_DISABLE") == "1"
@@ -215,13 +224,23 @@ def autoheal_kline_sync(health):
 
     f = health.get("freshness", {}) or {}
     diff = f.get("kline_diff_days")
-    if diff is None or diff < 1:
+    reason = None
+    if diff is not None and diff >= 1:
+        reason = f"全局落后 {diff} 天"
+    else:
+        # 全局 MAX 已最新 ≠ 个股都最新：只要**多数个股落后于最领先那只**，就是没补完。
+        # 实测场景：东财当日线分批落地，先拿到的那几只把全库 MAX 顶到 T 日，
+        # 其余 190+ 只还停在 T-1；此时只看 kline_diff_days 会判定「不用补」。
+        n, stale = kline_coverage_probe(f.get("kline_latest"))
+        if n and len(stale) / n > COVERAGE_BAD_RATIO:
+            reason = f"覆盖不足（抽样 {n} 只中 {len(stale)} 只落后于 {f.get('kline_latest')}）"
+    if reason is None:
         return None
 
     now = beijing_now()
     t = now.strftime("%H:%M")
     if not (AUTOSYNC_START <= t <= AUTOSYNC_END):
-        print(f"ℹ️ K线落后 {diff} 天，但 {t} 不在自愈时段 {AUTOSYNC_START}~{AUTOSYNC_END}，跳过")
+        print(f"ℹ️ 需要补数（{reason}），但 {t} 不在自愈时段 {AUTOSYNC_START}~{AUTOSYNC_END}，跳过")
         return None
 
     trading, _confirmed, why = trading_day_status(now)
@@ -237,7 +256,7 @@ def autoheal_kline_sync(health):
         print(f"ℹ️ 服务端 K 线同步进行中（{sc}），跳过自愈避免并发")
         return None
 
-    print(f"🔧 K线落后 {diff} 天（最新 {f.get('kline_latest')}，期望 {f.get('expected')}），"
+    print(f"🔧 需要补数：{reason}（最新 {f.get('kline_latest')}，期望 {f.get('expected')}），"
           f"开始自愈同步，预算 {AUTOSYNC_BUDGET_MIN} 分钟")
     deadline = time.time() + AUTOSYNC_BUDGET_MIN * 60
     calls = 0
@@ -290,8 +309,18 @@ def autoheal_kline_sync(health):
         print(f"  ⚠️ 自愈后复查失败: {type(e).__name__}: {e}")
         return "fail"
     nd = after.get("freshness", {}).get("kline_diff_days")
-    print(f"🔧 自愈结束：{calls} 次调用，K线落后 {diff} → {nd} 天")
-    return "ok" if nd == 0 else "fail"
+    print(f"🔧 自愈结束：{calls} 次调用，全局落后 {diff} → {nd} 天")
+    if nd != 0:
+        return "fail"
+    # 全局新鲜还要看个股覆盖：本轮若是因为覆盖不足触发的，必须复查同一判据
+    n2, stale2 = kline_coverage_probe(after.get("freshness", {}).get("kline_latest"))
+    if n2:
+        bad = len(stale2) / n2 > COVERAGE_BAD_RATIO
+        verdict = "仍不足" if bad else "已补齐"
+        print(f"🔧 自愈后覆盖抽样：{n2} 只中 {len(stale2)} 只落后（{verdict}）")
+        if bad:
+            return "fail"
+    return "ok"
 
 
 def _norm_date(d):
@@ -511,7 +540,10 @@ def main():
     trading_confirmed = True
     heal = None             # 自愈三态：None=未尝试 / "ok" / "fail"
     heal_failed = False     # 自愈尝试过但没补上（按配置只留日志，不报警）
-    stale_notes = []        # 数据新鲜度备注：不进 problems（不建 Issue），但阻止误报「全健康」
+    stale_notes = []        # 数据新鲜度备注：只记录，不建 Issue、不染红、**不阻断自动关 Issue**
+    blocking_notes = []     # 达到 FRESHNESS_ALERT_DAYS 才进这里：此时「数据真的坏了」，
+                            # 要阻止自动关 Issue 并把下次巡检拉回 1 小时
+
 
     # 1. 服务可用性
     ok, info = fetch_version()
@@ -560,9 +592,11 @@ def main():
             # 但「跳过检查」不能等于「假定健康」：同步窗口内若数据仍落后且自愈没成功，
             # 必须留一条 note，否则会走「全健康 → 自动关闭 Issue」把 #7 误关（假绿）。
             kd = f.get("kline_diff_days")
-            if kd is not None and kd >= 1 and heal != "ok":
+            if kd is not None and kd >= FRESHNESS_ALERT_DAYS and heal != "ok":
+                blocking_notes.append(f"K线落后 {kd} 天（同步窗口内，未复核）")
+                print(f"⚠️ 同步窗口内 K线仍落后 {kd} 天（≥容忍线）且自愈未成功，保留 Issue 不自动关闭")
+            elif kd is not None and kd >= 1 and heal != "ok":
                 stale_notes.append(f"K线落后 {kd} 天（同步窗口内，未复核）")
-                print(f"⚠️ 同步窗口内 K线仍落后 {kd} 天且自愈未成功，保留 Issue 不自动关闭")
         elif not trading:
             print(f"ℹ️ 非交易日（{why}），跳过新鲜度检查")
         else:
@@ -572,15 +606,18 @@ def main():
             for name, diff, latest in (("K线", f.get("kline_diff_days"), f.get("kline_latest")),
                                        ("评分", f.get("score_diff_days"), f.get("score_latest"))):
                 if diff is None:
-                    stale_notes.append(f"{name}数据缺失（表无数据）")
+                    # 表里一条数据都没有＝真坏，不是「今天还没更新」
+                    blocking_notes.append(f"{name}数据缺失（表无数据）")
                     print(f"⚠️ {name}数据缺失：最新日期为空（表无数据）")
                 elif diff >= FRESHNESS_ALERT_DAYS:
-                    stale_notes.append(f"{name}落后 {diff} 天")
+                    # 超过容忍线：不建 Issue、不染红，但**要挂住遗留 Issue**别报假绿
+                    blocking_notes.append(f"{name}落后 {diff} 天")
                     print(f"⚠️ {name}数据过期：最新 {latest}，期望 {f.get('expected')}，落后 {diff} 天"
-                          f"（阈值 {FRESHNESS_ALERT_DAYS} 天；按配置只记录，不建 Issue、不染红）")
+                          f"（容忍线 {FRESHNESS_ALERT_DAYS} 天；按配置只记录，不建 Issue、不染红）")
                 elif diff > 0:
+                    # 容忍线内属日常：东财当日线 15:30 后才落地，白天差一天是正常的
                     stale_notes.append(f"{name}落后 {diff} 天")
-                    print(f"ℹ️ {name}落后 {diff} 天（阈值 {FRESHNESS_ALERT_DAYS} 天，未超）")
+                    print(f"ℹ️ {name}落后 {diff} 天（容忍线 {FRESHNESS_ALERT_DAYS} 天，未超）")
             print(f"ℹ️ 新鲜度: K线 {f.get('kline_diff_days')}天 / 评分 {f.get('score_diff_days')}天")
 
         # 3b. 覆盖度抽样：全库 MAX(trade_date) 新鲜 ≠ 个股都新鲜（见 kline_coverage_probe）
@@ -593,6 +630,8 @@ def main():
                 if len(stale) / n > COVERAGE_BAD_RATIO:
                     eg = ", ".join(f"{c}({d})" for c, d in stale[:3])
                     # 同样只记录，不建 Issue、不染红（见上方新鲜度处的说明）
+                    # 覆盖不足只记录、不阻断：东财当日线是分批落地的，白天常见
+                    # 「少数只先到 T 日、多数还在 T-1」，若拿它挂住 Issue 会永远关不掉。
                     stale_notes.append(f"K线覆盖不足（{len(stale)}/{n} 只落后）")
                     print(f"⚠️ K线覆盖不足：抽样 {n} 只中 {len(stale)} 只落后于全库最新 "
                           f"{f.get('kline_latest')}，示例 {eg}（按配置只记录）")
@@ -635,8 +674,9 @@ def main():
         due, due_why = True, "无心跳记录"
     if not due:
         print(f"ℹ️ 巡检节流：{due_why}，本轮只做自愈")
-        if problems or stale_notes:
-            print(f"ℹ️ 本次观察（按配置不报警）：问题={[p[0] for p in problems]} 备注={stale_notes}")
+        if problems or stale_notes or blocking_notes:
+            print(f"ℹ️ 本次观察（按配置不报警）：问题={[p[0] for p in problems]} "
+                  f"备注={stale_notes + blocking_notes}")
         sys.exit(0)
     print(f"ℹ️ 巡检到期（{due_why}），执行完整巡检与报警判定")
 
@@ -667,15 +707,17 @@ def main():
         # problems 为空 ≠ 全健康：数据陈旧不进 problems（不建 Issue），但也不能
         # 因此把遗留 Issue #7 关掉 —— 那会造成「数据还没补上就先报全绿」。
         # 只有新鲜度也没问题，才算真的健康并关闭遗留 Issue。
-        if stale_notes:
-            print("ℹ️ 无服务故障；但数据新鲜度仍有问题（按配置不建 Issue、不染红）："
-                  + "；".join(stale_notes))
+        if blocking_notes:
+            print("ℹ️ 无服务故障；但数据已超容忍线（按配置不建 Issue、不染红）："
+                  + "；".join(blocking_notes))
             print("ℹ️ 保留遗留 Issue 不自动关闭，待数据补齐后下次运行会自动关闭")
         else:
+            if stale_notes:
+                print("ℹ️ 观察备注（不阻断、不影响自动关闭）：" + "；".join(stale_notes))
             print("✅ 全部健康")
             close_stale_issue()
-        # 数据未补齐（stale_notes 非空）也按异常处理 → 1 小时后复查，等补数落地再关 Issue
-        gap = REPORT_RETRY_HOURS if stale_notes else REPORT_INTERVAL_HOURS
+        # 超过容忍线 → 1 小时后复查，等补数落地再关 Issue；容忍线内按 12 小时常规节奏
+        gap = REPORT_RETRY_HOURS if blocking_notes else REPORT_INTERVAL_HOURS
         write_heartbeat(hb_num, now_bj, now_bj + datetime.timedelta(hours=gap))
         sys.exit(0)
 
