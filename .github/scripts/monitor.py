@@ -86,6 +86,13 @@ AUTOSYNC_END = "22:00"       # 超过此点不补当天，避免把隔夜数据�
 AUTOSYNC_BUDGET_MIN = 30     # 单轮总时长预算（Actions job 默认 360 分钟，留足余量）
 AUTOSYNC_DISABLE = os.environ.get("AUTOSYNC_DISABLE") == "1"
 
+# 非紧急补数的重试时段（北京）。「非紧急」= 只差 1 天 / 只是覆盖不足。
+# 为什么必须限次：东财对同一出口 IP 有速率限制，实测 30 分钟内连跑两轮完整同步后
+# 接口开始**静默返回空数组**（step 返回 processed=10 / klineCount=0 / errors=0，
+# 既不报错也不写数据），腾讯回退同样拿不到东西 —— 越猛试越补不上。
+# 所以：真落后（>=2 天）才在 15:35~22:00 每轮都试；只差一天就给两个时段各试一次。
+COVERAGE_HEAL_SLOTS = (("15:35", "16:35"), ("19:30", "20:30"))
+
 # ---- 巡检节流（2026-11-03，v1.9.6）----
 # 用户要求「每 12 小时跑一次」。但 monitor.yml 在 .github/workflows/ 下，当前 PAT
 # 只有 `repo` scope、推不动 workflow 文件（API 返回 404），所以改在脚本内部节流。
@@ -239,8 +246,16 @@ def autoheal_kline_sync(health):
 
     now = beijing_now()
     t = now.strftime("%H:%M")
-    if not (AUTOSYNC_START <= t <= AUTOSYNC_END):
-        print(f"ℹ️ 需要补数（{reason}），但 {t} 不在自愈时段 {AUTOSYNC_START}~{AUTOSYNC_END}，跳过")
+    # 紧急 = 真落后（>=2 天）：整个自愈时段每轮都试。
+    # 只差 1 天或仅覆盖不足 → 只在 COVERAGE_HEAL_SLOTS 试，避免把上游配额烧光。
+    urgent = diff is None or diff >= 2
+    if urgent:
+        if not (AUTOSYNC_START <= t <= AUTOSYNC_END):
+            print(f"ℹ️ 需要补数（{reason}），但 {t} 不在自愈时段 {AUTOSYNC_START}~{AUTOSYNC_END}，跳过")
+            return None
+    elif not any(a <= t <= b for a, b in COVERAGE_HEAL_SLOTS):
+        print(f"ℹ️ 需要补数（{reason}），但属非紧急（只差 1 天/覆盖不足），"
+              f"{t} 不在重试时段 {COVERAGE_HEAL_SLOTS}，跳过以免触发上游限流")
         return None
 
     trading, _confirmed, why = trading_day_status(now)
