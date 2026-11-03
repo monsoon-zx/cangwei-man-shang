@@ -31,6 +31,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -38,7 +39,8 @@ BASE_URL = os.environ.get("BASE_URL", "https://cangwei-man-shang.onrender.com")
 ISSUE_TITLE = "[监控] 线上健康异常"
 
 # ---- 阈值（按需调整） ----
-FRESHNESS_ALERT_DAYS = 3    # 数据落后 >=3 自然日告警（周末 2 天 + 1 缓冲）
+FRESHNESS_ALERT_DAYS = 7    # 数据落后 >=7 自然日才在日志里标警示（A股一周5个交易日，
+                            # 原 3 天遇到「周五数据 + 周末 2 天」就会命中，过紧）
 MIN_POOL = 100              # 股票池少于 100 只告警（正常 200）
 MIN_KLINES = 10000          # K线少于 1 万条告警（正常 ~12.4 万）
 SYNC_WINDOW_START = "15:30"  # 北京时间收盘同步窗口，窗口内跳过新鲜度检查
@@ -57,6 +59,17 @@ CN_HOLIDAYS = {
 
 # 只有这些是真故障、值得把 workflow 染红；数据陈旧属于「要人看」而不是「服务挂了」
 FATAL_PROBLEMS = {"服务不可用", "监控接口异常"}
+
+# ---- 自愈同步（2026-11-03 新增，代替从未入库的 sync.yml） ----
+# 为什么放在 monitor.py 而不是独立 workflow：
+#   .github/workflows/sync.yml 因 PAT 缺 workflow scope 一直无法推送（API 返回 404），
+#   Render 免费实例的 node-cron 又随休眠失效（crowding 停更 66 天为证）。而
+#   monitor.py 在 .github/scripts/ 下、属普通文件，可正常更新，且 monitor.yml
+#   已经每小时触发它 —— 直接复用这条已验证可靠的调度。
+AUTOSYNC_START = "15:05"     # 北京，15:00 收盘后留 5 分钟给数据落定
+AUTOSYNC_END = "22:00"       # 超过此点不补当天，避免把隔夜数据算错
+AUTOSYNC_BUDGET_MIN = 30     # 单轮总时长预算（Actions job 默认 360 分钟，留足余量）
+AUTOSYNC_DISABLE = os.environ.get("AUTOSYNC_DISABLE") == "1"
 
 
 def beijing_now():
@@ -130,6 +143,126 @@ def fetch_version():
 def fetch_health():
     status, data = http_json(f"{BASE_URL}/api/monitor/health", timeout=120)
     return data
+
+
+def post_json(path, payload, timeout=120):
+    req = urllib.request.Request(
+        BASE_URL.rstrip("/") + path,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "monitor-autosync"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.status, json.loads(r.read().decode())
+
+
+def parse_progress(p):
+    """'12/200' → (12, 200)；格式不符返回 (None, None)"""
+    if not p or "/" not in str(p):
+        return None, None
+    a, b = str(p).split("/", 1)
+    try:
+        return int(a), int(b)
+    except ValueError:
+        return None, None
+
+
+def autoheal_kline_sync(health):
+    """K 线落后时主动驱动服务端 step=kline，直到一轮跑完或超预算。
+
+    为什么必须由外部驱动：`step=full-pipeline` 用**全库** MAX(trade_date) 判新鲜，
+    只要一只股票写入就转去算指标，实测一轮只推进 9/200 只（假绿）。分步接口
+    `step=kline` 用服务端内存 offset 顺序推进，才能把整轮跑完。
+
+    约束：单次调用服务端最多跑 50 秒，实际由时间预算决定处理量，约 6~15 只/次。
+
+    返回三态，用于决定要不要把 workflow 染红：
+      "ok"   = 真的驱动过且复查已新鲜
+      "fail" = 真的驱动过但复查仍落后（需要人工介入）
+      None   = 没有尝试（不落后 / 不在时段 / 非交易日 / 别的任务在跑 / 已禁用）
+    """
+    if AUTOSYNC_DISABLE or not health:
+        return None
+
+    f = health.get("freshness", {}) or {}
+    diff = f.get("kline_diff_days")
+    if diff is None or diff < 1:
+        return None
+
+    now = beijing_now()
+    t = now.strftime("%H:%M")
+    if not (AUTOSYNC_START <= t <= AUTOSYNC_END):
+        print(f"ℹ️ K线落后 {diff} 天，但 {t} 不在自愈时段 {AUTOSYNC_START}~{AUTOSYNC_END}，跳过")
+        return None
+
+    trading, _confirmed, why = trading_day_status(now)
+    if not trading:
+        print(f"ℹ️ 非交易日（{why}），不触发自愈")
+        return None
+
+    # 防并发：上一轮还没跑完（服务端 offset 非 idle）时不要插手。
+    # 自愈最长 30 分钟，可能跨过整点与下一次定时触发重叠；两边同时驱动
+    # 同一份内存 offset 虽然幂等但会重复拉取，先让在跑的那一轮跑完。
+    sc = (health.get("sync") or {}).get("kline")
+    if sc and sc != "idle":
+        print(f"ℹ️ 服务端 K 线同步进行中（{sc}），跳过自愈避免并发")
+        return None
+
+    print(f"🔧 K线落后 {diff} 天（最新 {f.get('kline_latest')}，期望 {f.get('expected')}），"
+          f"开始自愈同步，预算 {AUTOSYNC_BUDGET_MIN} 分钟")
+    deadline = time.time() + AUTOSYNC_BUDGET_MIN * 60
+    calls = 0
+    prev_off = None
+    empties = 0
+
+    while time.time() < deadline:
+        try:
+            _, resp = post_json("/api/sync/step", {"step": "kline", "batchSize": 10})
+        except Exception as e:
+            print(f"  自愈调用失败: {type(e).__name__}: {e}")
+            empties += 1
+            if empties >= 3:
+                print("  ❌ 连续 3 次调用失败，中止自愈")
+                break
+            time.sleep(8)
+            continue
+
+        calls += 1
+        done = bool(resp.get("done"))
+        processed = resp.get("processed", 0) or 0
+        written = resp.get("klineCount", 0) or 0
+        off, _tot = parse_progress(resp.get("progress"))
+        note = ""
+        if off is not None and prev_off is not None and off < prev_off:
+            note = f"  ← ⚠ 进度回退 {prev_off}→{off}（实例重启）"
+        if off is not None:
+            prev_off = off
+        print(f"  [{calls}] 处理 {processed:>3} 只 | 写入 {written:>5} 行 | "
+              f"进度 {resp.get('progress')}{' | done ✅' if done else ''}{note}")
+
+        if done:
+            break
+        if processed == 0:
+            empties += 1
+            if empties >= 3:
+                print("  ❌ 连续 3 次空转（processed=0），中止自愈")
+                break
+        else:
+            empties = 0
+
+    if calls == 0:
+        # 一次都没成功调用：可能是接口异常/网络问题，也可能是时间预算一开始就耗尽。
+        # 前者算「尝试过但没成」，交给外层按同步故障处理；后者只是没轮到，不算失败。
+        return "fail" if empties else None
+
+    try:
+        after = fetch_health()
+    except Exception as e:
+        print(f"  ⚠️ 自愈后复查失败: {type(e).__name__}: {e}")
+        return "fail"
+    nd = after.get("freshness", {}).get("kline_diff_days")
+    print(f"🔧 自愈结束：{calls} 次调用，K线落后 {diff} → {nd} 天")
+    return "ok" if nd == 0 else "fail"
 
 
 def _norm_date(d):
@@ -279,6 +412,8 @@ def main():
     version = "unknown"
     trading = True          # 供退出码判断：非交易日的数据陈旧不算故障
     trading_confirmed = True
+    heal_failed = False     # 自愈尝试过但没补上（按配置只留日志，不报警）
+    stale_notes = []        # 数据新鲜度备注：不进 problems（不建 Issue），但阻止误报「全健康」
 
     # 1. 服务可用性
     ok, info = fetch_version()
@@ -302,6 +437,22 @@ def main():
         f = health.get("freshness", {})
         s = health.get("signals", {})
 
+        # 2b. 自愈：K线落后则先尝试主动补数，再用复查后的快照做告警判定。
+        #     补成功就不该再报「数据过期」，遗留 Issue 也会在末尾自动关闭。
+        heal = autoheal_kline_sync(health)
+        heal_failed = (heal == "fail")
+        if heal_failed:
+            print("⚠️ 自愈未能把 K 线补到最新（按配置不建 Issue、不染红，此处仅留日志）")
+        if heal == "ok":
+            try:
+                health = fetch_health()
+                db = health.get("db", {})
+                f = health.get("freshness", {})
+                s = health.get("signals", {})
+                print("✅ 自愈后 K 线已到最新交易日，重新判定")
+            except Exception as e:
+                print(f"⚠️ 自愈后重取健康接口失败: {type(e).__name__}: {e}")
+
         # 3. 数据新鲜度（同步窗口内、非交易日跳过，避免长假误报）
         trading, trading_confirmed, why = trading_day_status(beijing_now())
         print(f"ℹ️ 交易日判定: {'是' if trading else '否'}（{why}）"
@@ -311,12 +462,21 @@ def main():
         elif not trading:
             print(f"ℹ️ 非交易日（{why}），跳过新鲜度检查")
         else:
+            # 数据陈旧**只写日志**（2026-11-03 按用户要求：不建 Issue、不染红）。
+            # 补数由 autoheal_kline_sync 负责；它的结果也只在日志里体现。
+            # 留着这几行是为了出问题时能从 Actions 日志回溯，而不是彻底失明。
             for name, diff, latest in (("K线", f.get("kline_diff_days"), f.get("kline_latest")),
                                        ("评分", f.get("score_diff_days"), f.get("score_latest"))):
                 if diff is None:
-                    problems.append((f"{name}数据缺失", "最新日期为空（表无数据）"))
+                    stale_notes.append(f"{name}数据缺失（表无数据）")
+                    print(f"⚠️ {name}数据缺失：最新日期为空（表无数据）")
                 elif diff >= FRESHNESS_ALERT_DAYS:
-                    problems.append((f"{name}数据过期", f"最新 {latest}，期望 {f.get('expected')}，落后 {diff} 天"))
+                    stale_notes.append(f"{name}落后 {diff} 天")
+                    print(f"⚠️ {name}数据过期：最新 {latest}，期望 {f.get('expected')}，落后 {diff} 天"
+                          f"（阈值 {FRESHNESS_ALERT_DAYS} 天；按配置只记录，不建 Issue、不染红）")
+                elif diff > 0:
+                    stale_notes.append(f"{name}落后 {diff} 天")
+                    print(f"ℹ️ {name}落后 {diff} 天（阈值 {FRESHNESS_ALERT_DAYS} 天，未超）")
             print(f"ℹ️ 新鲜度: K线 {f.get('kline_diff_days')}天 / 评分 {f.get('score_diff_days')}天")
 
         # 3b. 覆盖度抽样：全库 MAX(trade_date) 新鲜 ≠ 个股都新鲜（见 kline_coverage_probe）
@@ -328,9 +488,10 @@ def main():
                 print(f"ℹ️ 覆盖度抽样: {n} 只中 {len(stale)} 只落后于全库最新 {f.get('kline_latest')}")
                 if len(stale) / n > COVERAGE_BAD_RATIO:
                     eg = ", ".join(f"{c}({d})" for c, d in stale[:3])
-                    problems.append(("K线覆盖不足",
-                                     f"抽样 {n} 只中 {len(stale)} 只落后于全库最新 "
-                                     f"{f.get('kline_latest')}，示例 {eg}"))
+                    # 同样只记录，不建 Issue、不染红（见上方新鲜度处的说明）
+                    stale_notes.append(f"K线覆盖不足（{len(stale)}/{n} 只落后）")
+                    print(f"⚠️ K线覆盖不足：抽样 {n} 只中 {len(stale)} 只落后于全库最新 "
+                          f"{f.get('kline_latest')}，示例 {eg}（按配置只记录）")
 
         # 4. 数据完整性
         if db.get("pool", 0) < MIN_POOL:
@@ -365,19 +526,27 @@ def main():
         # 原先把一切都 exit(1)，导致长假期间每小时变红，报警疲劳后真故障也会被忽略。
         # 交易日判定不确定时（行情接口不可达）从宽处理，不因判定失败而误报红色。
         fatal = [p for p in problems if p[0] in FATAL_PROBLEMS]
-        if not fatal:
-            # 「数据过期」与「覆盖不足」都是确凿的同步故障：前者是全库没跟上，
-            # 后者是全库看着新鲜但个股大面积没跟上（假绿），两者都值得染红。
-            fatal = [p for p in problems if trading and trading_confirmed
-                     and ("数据过期" in p[0] or p[0] == "K线覆盖不足")]
+        # 2026-11-03 按用户要求：数据新鲜度 / 覆盖度彻底退出报警体系
+        # （不建 Issue、不染红），补数交给 autoheal_kline_sync。
+        # 这里只保留真故障：服务不可用、监控接口异常。
+        # 注意「数据坏了」（池子不足、表为空、信号全 sell）仍会建 Issue——
+        # 那是数据质量问题，不是「今天还没更新」，两者不该混为一谈。
         if fatal:
             print(f"❌ 致命问题 {len(fatal)} 个，workflow 标记失败: {[p[0] for p in fatal]}")
             sys.exit(1)
         print("⚠️ 仅非致命问题（已建 Issue），workflow 保持成功，避免报警疲劳")
         sys.exit(0)
     else:
-        print("✅ 全部健康")
-        close_stale_issue()
+        # problems 为空 ≠ 全健康：数据陈旧不进 problems（不建 Issue），但也不能
+        # 因此把遗留 Issue #7 关掉 —— 那会造成「数据还没补上就先报全绿」。
+        # 只有新鲜度也没问题，才算真的健康并关闭遗留 Issue。
+        if stale_notes:
+            print("ℹ️ 无服务故障；但数据新鲜度仍有问题（按配置不建 Issue、不染红）："
+                  + "；".join(stale_notes))
+            print("ℹ️ 保留遗留 Issue 不自动关闭，待数据补齐后下次运行会自动关闭")
+        else:
+            print("✅ 全部健康")
+            close_stale_issue()
         sys.exit(0)
 
 
