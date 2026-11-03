@@ -14,7 +14,8 @@
 巡检频率（2026-11-03 v1.9.6）
   workflow 本身仍是每小时触发，但脚本内部按 REPORT_INTERVAL_HOURS（12 小时）节流：
   只有距上次巡检满 12 小时才做完整的健康巡检 + Issue 判定/关闭；其余触发只跑
-  「自愈补 K 线」（静默，零噪音）。为什么不用固定小时、状态存在哪，见该常量处注释。
+  「自愈补 K 线」（静默，零噪音）。**发现异常则改为 1 小时复查**，好在修好后尽快
+  自动关闭遗留 Issue。为什么不用固定小时、状态存在哪，见该常量处注释。
 
 Issue 生命周期（2026-10-28 修复）
   原逻辑只会「建 Issue」，从不关闭。9-28 那个 Issue 一直挂着，导致之后**所有新异常
@@ -94,6 +95,9 @@ AUTOSYNC_DISABLE = os.environ.get("AUTOSYNC_DISABLE") == "1"
 # 状态存哪：workflow 只给了 `issues: write` 权限（推不动文件、也不能提交状态文件），
 #   所以用一个专用心跳 Issue 存时间戳，写完立刻自动关闭，不在 open 列表里碍眼。
 REPORT_INTERVAL_HOURS = 12
+REPORT_RETRY_HOURS = 1      # 本轮有异常（Issue 已存在或数据未补齐）时改为 1 小时复查：
+                            # 复查不会产生新噪音（标题去重），但能让「修好了」尽快自动关 Issue，
+                            # 而不是让 #7 在 open 里挂到下一个 12 小时窗口。
 HEARTBEAT_TITLE = "[监控] 巡检心跳（自动生成，勿删）"
 
 
@@ -410,34 +414,43 @@ def close_stale_issue():
 
 
 def read_heartbeat():
-    """读「上次巡检时间」→ (issue_number, datetime|None)
+    """读巡检心跳 → (issue_number, 上次巡检 datetime|None, 下次应检 datetime|None)
 
-    任何读取失败都返回 (None, None)，调用方据此按「已到期」处理：
+    任何读取失败都返回 (None, None, None)，调用方据此按「已到期」处理：
     宁可多巡检一次，也不能因为状态读不到而永久失明。
     """
     items = list_issues("all")
     if items is None:
-        return None, None
+        return None, None, None
     for it in items:
         if it.get("title") != HEARTBEAT_TITLE:
             continue
         num = it.get("number")
+        last = nxt = None
         for line in (it.get("body") or "").splitlines():
             line = line.strip()
-            if line.startswith("最后巡检:"):
+            for prefix, setter in (("最后巡检:", "last"), ("下次应检:", "next")):
+                if not line.startswith(prefix):
+                    continue
                 try:
-                    return num, datetime.datetime.fromisoformat(line.split(":", 1)[1].strip())
+                    val = datetime.datetime.fromisoformat(line.split(":", 1)[1].strip())
                 except ValueError:
-                    return num, None
-        return num, None
-    return None, None
+                    continue
+                if setter == "last":
+                    last = val
+                else:
+                    nxt = val
+        return num, last, nxt
+    return None, None, None
 
 
-def write_heartbeat(num, dt):
-    """记录本次巡检时间。首次没有心跳 Issue 时新建并立即关闭（不占 open 列表）"""
-    body = (f"最后巡检: {dt.isoformat()}\n\n"
-            "> 本 Issue 由监控任务自动维护，仅用于记录「上次巡检时间」，"
-            f"以此实现每 {REPORT_INTERVAL_HOURS} 小时巡检一次。\n"
+def write_heartbeat(num, dt, next_due):
+    """记录本次巡检时间与下次应检时间。首次没有心跳 Issue 时新建并立即关闭（不占 open 列表）"""
+    body = (f"最后巡检: {dt.isoformat()}\n"
+            f"下次应检: {next_due.isoformat()}\n\n"
+            "> 本 Issue 由监控任务自动维护，仅用于记录巡检节流状态："
+            f"常规每 {REPORT_INTERVAL_HOURS} 小时巡检一次，"
+            f"发现异常后每 {REPORT_RETRY_HOURS} 小时复查一次。\n"
             "> 删除或改写不会造成故障，只会让下一次巡检提前。\n")
     if num:
         r = run_gh(["issue", "edit", str(num), "--body", body])
@@ -610,15 +623,18 @@ def main():
     # 节流闸门：距上次巡检不满 REPORT_INTERVAL_HOURS 就只做自愈，不改动 Issue、不染红。
     # 检查逻辑全部照跑、日志照留，只是不产生任何对外噪音（见文件头 REPORT_INTERVAL_HOURS）。
     now_bj = beijing_now()
-    hb_num, last_report = read_heartbeat()
-    if last_report is None:
-        due, due_why = True, "无心跳记录"
-    else:
+    hb_num, last_report, next_due = read_heartbeat()
+    if next_due is not None:
+        due = now_bj >= next_due
+        due_why = f"下次应检 {next_due:%m-%d %H:%M}（{'已到' if due else '未到'}）"
+    elif last_report is not None:
         elapsed = now_bj - last_report
         due = elapsed >= datetime.timedelta(hours=REPORT_INTERVAL_HOURS)
-        due_why = f"距上次巡检 {elapsed.total_seconds() / 3600:.1f} 小时"
+        due_why = f"距上次巡检 {elapsed.total_seconds() / 3600:.1f} 小时（无下次应检记录）"
+    else:
+        due, due_why = True, "无心跳记录"
     if not due:
-        print(f"ℹ️ 巡检节流：{due_why}（阈值 {REPORT_INTERVAL_HOURS} 小时），本轮只做自愈")
+        print(f"ℹ️ 巡检节流：{due_why}，本轮只做自愈")
         if problems or stale_notes:
             print(f"ℹ️ 本次观察（按配置不报警）：问题={[p[0] for p in problems]} 备注={stale_notes}")
         sys.exit(0)
@@ -630,7 +646,9 @@ def main():
             create_issue(build_body(problems, health or {}, version, checked_at))
         else:
             print("ℹ️ 已存在相同标题的 open Issue，跳过（避免刷屏）")
-        write_heartbeat(hb_num, now_bj)
+        # 有异常 → 1 小时后复查（Issue 已建，复查不产生新噪音，但能在恢复后尽快自动关闭）
+        write_heartbeat(hb_num, now_bj,
+                        now_bj + datetime.timedelta(hours=REPORT_RETRY_HOURS))
         # 染红与否：只有真故障才让 workflow 失败。数据陈旧走 Issue 通道即可——
         # 原先把一切都 exit(1)，导致长假期间每小时变红，报警疲劳后真故障也会被忽略。
         # 交易日判定不确定时（行情接口不可达）从宽处理，不因判定失败而误报红色。
@@ -656,7 +674,9 @@ def main():
         else:
             print("✅ 全部健康")
             close_stale_issue()
-        write_heartbeat(hb_num, now_bj)
+        # 数据未补齐（stale_notes 非空）也按异常处理 → 1 小时后复查，等补数落地再关 Issue
+        gap = REPORT_RETRY_HOURS if stale_notes else REPORT_INTERVAL_HOURS
+        write_heartbeat(hb_num, now_bj, now_bj + datetime.timedelta(hours=gap))
         sys.exit(0)
 
 
