@@ -12,9 +12,9 @@
 报警方式：发现问题时用 gh 创建 GitHub Issue（标题固定去重，已有 open Issue 则跳过）
 
 巡检频率（2026-11-03 v1.9.6）
-  workflow 本身仍是每小时触发，但脚本内部按 REPORT_HOURS（北京 04/16 点）节流：
-  只有这两个小时才做完整的健康巡检 + Issue 判定/关闭；其余整点只跑「自愈补 K 线」
-  （静默，零噪音）。原因与代价见 REPORT_HOURS 处注释。
+  workflow 本身仍是每小时触发，但脚本内部按 REPORT_INTERVAL_HOURS（12 小时）节流：
+  只有距上次巡检满 12 小时才做完整的健康巡检 + Issue 判定/关闭；其余触发只跑
+  「自愈补 K 线」（静默，零噪音）。为什么不用固定小时、状态存在哪，见该常量处注释。
 
 Issue 生命周期（2026-10-28 修复）
   原逻辑只会「建 Issue」，从不关闭。9-28 那个 Issue 一直挂着，导致之后**所有新异常
@@ -80,12 +80,21 @@ AUTOSYNC_DISABLE = os.environ.get("AUTOSYNC_DISABLE") == "1"
 # 用户要求「每 12 小时跑一次」。但 monitor.yml 在 .github/workflows/ 下，当前 PAT
 # 只有 `repo` scope、推不动 workflow 文件（API 返回 404），所以改在脚本内部节流。
 # 两条通道分开处理，各取所需：
-#   · 自愈同步（补 K 线）→ **仍然每小时尝试**。它只写 Actions 日志、不建 Issue、不染红，
+#   · 自愈同步（补 K 线）→ **每次触发都尝试**。它只写 Actions 日志、不建 Issue、不染红，
 #     零噪音；而补数越早越好、窗口内多重试几次成功率明显更高。压到 12 小时反而
-#     会让「16:00 补失败 → 等次日」成为单点故障。
-#   · 健康巡检 + Issue 判定/关闭 → 只在 REPORT_HOURS（北京）执行，即每 12 小时。
+#     会让「补失败 → 等次日」成为单点故障。
+#   · 健康巡检 + Issue 判定/关闭 → 距上次巡检满 12 小时才做。
 # 代价（已告知用户）：服务挂掉的发现延迟从 1 小时延长到最长 12 小时。
-REPORT_HOURS = (4, 16)      # 北京 04:00 / 16:00；16:00 紧跟自愈窗口，补完立刻复核
+#
+# 为什么用「时间间隔 + 心跳」而不是「固定小时」：
+#   实测这个公开仓库的 schedule 被 GitHub 严重限流 —— 最近 12 次运行实际发生在
+#   03:50Z / 22:35Z / 13:06Z / 04:36Z …（约 4~7 小时一次，且整点漂移 30~60 分钟）。
+#   写死「只在北京 04/16 点跑」会因漂移整点错过，导致一整天都不巡检。
+#   改为记录「上次巡检时间」再算间隔，调度怎么漂都能精确 12 小时一次。
+# 状态存哪：workflow 只给了 `issues: write` 权限（推不动文件、也不能提交状态文件），
+#   所以用一个专用心跳 Issue 存时间戳，写完立刻自动关闭，不在 open 列表里碍眼。
+REPORT_INTERVAL_HOURS = 12
+HEARTBEAT_TITLE = "[监控] 巡检心跳（自动生成，勿删）"
 
 
 def beijing_now():
@@ -392,6 +401,67 @@ def close_stale_issue():
         print("ℹ️ 无遗留 open Issue 需要关闭")
 
 
+def read_heartbeat():
+    """读「上次巡检时间」→ (issue_number, datetime|None)
+
+    任何读取失败都返回 (None, None)，调用方据此按「已到期」处理：
+    宁可多巡检一次，也不能因为状态读不到而永久失明。
+
+    这里刻意不用 `--search` 而直接列全部（本仓库 Issue 总量个位数）：GitHub 的
+    全文检索对无空格中文标题的分词不可靠，一旦搜不到就会每次重建心跳 Issue 刷屏。
+    """
+    r = run_gh(["issue", "list", "--state", "all", "--limit", "100",
+                "--json", "number,title,body"])
+    if r is None or r.returncode != 0:
+        print(f"ℹ️ 读取巡检心跳失败，按已到期处理"
+              f"（{('gh 不可用' if r is None else r.stderr.strip())}）")
+        return None, None
+    try:
+        items = json.loads(r.stdout or "[]")
+    except ValueError:
+        return None, None
+    for it in items:
+        if it.get("title") != HEARTBEAT_TITLE:
+            continue
+        num = it.get("number")
+        for line in (it.get("body") or "").splitlines():
+            line = line.strip()
+            if line.startswith("最后巡检:"):
+                try:
+                    return num, datetime.datetime.fromisoformat(line.split(":", 1)[1].strip())
+                except ValueError:
+                    return num, None
+        return num, None
+    return None, None
+
+
+def write_heartbeat(num, dt):
+    """记录本次巡检时间。首次没有心跳 Issue 时新建并立即关闭（不占 open 列表）"""
+    body = (f"最后巡检: {dt.isoformat()}\n\n"
+            "> 本 Issue 由监控任务自动维护，仅用于记录「上次巡检时间」，"
+            f"以此实现每 {REPORT_INTERVAL_HOURS} 小时巡检一次。\n"
+            "> 删除或改写不会造成故障，只会让下一次巡检提前。\n")
+    if num:
+        r = run_gh(["issue", "edit", str(num), "--body", body])
+        if r is not None and r.returncode == 0:
+            print(f"✅ 巡检心跳已更新（Issue #{num}）")
+        elif r is not None:
+            print(f"⚠️ 巡检心跳更新失败: {r.stderr.strip()}")
+        return
+    r = run_gh(["issue", "create", "--title", HEARTBEAT_TITLE, "--body", body])
+    if r is None or r.returncode != 0:
+        print(f"⚠️ 巡检心跳创建失败: {'gh 不可用' if r is None else r.stderr.strip()}")
+        return
+    url = (r.stdout or "").strip()
+    print(f"✅ 巡检心跳已创建: {url}")
+    created = url.rstrip("/").split("/")[-1]
+    if created.isdigit():
+        cr = run_gh(["issue", "close", created, "--comment",
+                     "巡检心跳记录，自动关闭以免占用 open 列表。"])
+        if cr is not None and cr.returncode == 0:
+            print(f"✅ 巡检心跳 Issue #{created} 已自动关闭")
+
+
 def build_body(problems, health, version, checked_at):
     lines = [f"## ⚠️ 线上服务健康异常", "", f"**检查时间**: {checked_at} (北京时间)", f"**服务版本**: {version}", ""]
     lines.append("### 发现问题")
@@ -539,15 +609,22 @@ def main():
         print(f"ℹ️ 同步: {health.get('sync')}")
 
     # 6. 报警
-    # 节流闸门：非巡检小时只做自愈，不改动 Issue、不染红（见文件头 REPORT_HOURS 说明）。
-    # 检查逻辑全部照跑，日志照留 —— 想看细节随时翻 Actions，只是不产生任何对外噪音。
+    # 节流闸门：距上次巡检不满 REPORT_INTERVAL_HOURS 就只做自愈，不改动 Issue、不染红。
+    # 检查逻辑全部照跑、日志照留，只是不产生任何对外噪音（见文件头 REPORT_INTERVAL_HOURS）。
     now_bj = beijing_now()
-    if now_bj.hour not in REPORT_HOURS:
-        print(f"ℹ️ 非巡检小时（北京 {now_bj:%H:%M}），仅执行自愈；"
-              f"完整巡检在每 {sorted(REPORT_HOURS)[0]} 点和 {sorted(REPORT_HOURS)[1]} 点（北京）")
+    hb_num, last_report = read_heartbeat()
+    if last_report is None:
+        due, due_why = True, "无心跳记录"
+    else:
+        elapsed = now_bj - last_report
+        due = elapsed >= datetime.timedelta(hours=REPORT_INTERVAL_HOURS)
+        due_why = f"距上次巡检 {elapsed.total_seconds() / 3600:.1f} 小时"
+    if not due:
+        print(f"ℹ️ 巡检节流：{due_why}（阈值 {REPORT_INTERVAL_HOURS} 小时），本轮只做自愈")
         if problems or stale_notes:
             print(f"ℹ️ 本次观察（按配置不报警）：问题={[p[0] for p in problems]} 备注={stale_notes}")
         sys.exit(0)
+    print(f"ℹ️ 巡检到期（{due_why}），执行完整巡检与报警判定")
 
     if problems:
         print(f"⚠️ 发现 {len(problems)} 个问题，尝试创建 Issue...")
@@ -555,6 +632,7 @@ def main():
             create_issue(build_body(problems, health or {}, version, checked_at))
         else:
             print("ℹ️ 已存在相同标题的 open Issue，跳过（避免刷屏）")
+        write_heartbeat(hb_num, now_bj)
         # 染红与否：只有真故障才让 workflow 失败。数据陈旧走 Issue 通道即可——
         # 原先把一切都 exit(1)，导致长假期间每小时变红，报警疲劳后真故障也会被忽略。
         # 交易日判定不确定时（行情接口不可达）从宽处理，不因判定失败而误报红色。
@@ -580,6 +658,7 @@ def main():
         else:
             print("✅ 全部健康")
             close_stale_issue()
+        write_heartbeat(hb_num, now_bj)
         sys.exit(0)
 
 
