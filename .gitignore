@@ -17,3 +17,29 @@
 /data/crypto/replay_run.log
 /data/crypto/paper/*.bak_*
 /data/crypto/paper/state.json.bak*
+
+# ---------------------------------------------------------------------------
+# 策略核心禁止进明文仓库（2026-11-06）
+#
+# 上面的 !/scripts/crypto_*.py 是为了收早期实验脚本，但它同时会把 v3.4 的
+# 引擎、指标、11 种打法一起放进来。scripts/sync_crypto_to_github.sh 用的是
+# `git add -A`，一旦执行就会把明文策略推到公开仓库 → 必须在这里显式挡回去。
+#
+# 这些文件改走 algo 分支的 AES-256-GCM 加密归档：
+#   python scripts/publish_algo_encrypted.py
+# ---------------------------------------------------------------------------
+/scripts/crypto_regime_router.py
+/scripts/crypto_paper_v3.py
+/scripts/crypto_orders.py
+/scripts/crypto_boost.py
+/scripts/crypto_dd_ctrl.py
+/scripts/crypto_realistic.py
+/scripts/crypto_holdstudy.py
+/scripts/crypto_bayes*.py
+/scripts/crypto_v37_*.py
+/scripts/crypto_slip_*.py
+/scripts/publish_*.py
+# 发布用的独立 clone（brief / algo 分支），不属于本仓库工作树
+/.brief-repo/
+/.algo-repo/
+
