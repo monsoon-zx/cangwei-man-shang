@@ -2,24 +2,24 @@
  "current": {
   "date": "2026-11-06",
   "file": "algo/crypto-algo-2026-11-06.tar.gz.enc",
-  "created_at": "2026-11-06T11:35:17+08:00",
+  "created_at": "2026-11-06T11:35:25+08:00",
   "file_count": 53,
   "plain_bytes": 237139,
   "cipher_bytes": 237171,
-  "plain_sha256": "3c64665aed7f5b3feec01566f54ff5c9a12804337993c731e7c27b2a32e2405f",
-  "cipher_sha256": "4d31c609baa713869e676434ef088954b21a488f13c97604ce00a69078d45084",
+  "plain_sha256": "9ecf02bf50fef76a353142b9c92ac4e6c26c65b40be9ca8451a3b539ba8650b9",
+  "cipher_sha256": "357999a2c204b69e49296d6274a7cded50dbfc1b01d072e908b746892ba3d2bf",
   "key_id": "edd77dc4"
  },
  "archives": [
   {
    "date": "2026-11-06",
    "file": "algo/crypto-algo-2026-11-06.tar.gz.enc",
-   "created_at": "2026-11-06T11:35:17+08:00",
+   "created_at": "2026-11-06T11:35:25+08:00",
    "file_count": 53,
    "plain_bytes": 237139,
    "cipher_bytes": 237171,
-   "plain_sha256": "3c64665aed7f5b3feec01566f54ff5c9a12804337993c731e7c27b2a32e2405f",
-   "cipher_sha256": "4d31c609baa713869e676434ef088954b21a488f13c97604ce00a69078d45084",
+   "plain_sha256": "9ecf02bf50fef76a353142b9c92ac4e6c26c65b40be9ca8451a3b539ba8650b9",
+   "cipher_sha256": "357999a2c204b69e49296d6274a7cded50dbfc1b01d072e908b746892ba3d2bf",
    "key_id": "edd77dc4"
   }
  ]
