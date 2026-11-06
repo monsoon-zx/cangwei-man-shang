@@ -1,0 +1,26 @@
+{
+ "current": {
+  "date": "2026-11-06",
+  "file": "algo/crypto-algo-2026-11-06.tar.gz.enc",
+  "created_at": "2026-11-06T11:34:52+08:00",
+  "file_count": 53,
+  "plain_bytes": 237139,
+  "cipher_bytes": 237171,
+  "plain_sha256": "753982ecabaf169a6ba0c4f1398a79a42ba20b303c7e0505778ab8257927d995",
+  "cipher_sha256": "ed4b1317c1026ba5c520797fa1065c5a6518193f6b36d9f942fcf6368285707b",
+  "key_id": "edd77dc4"
+ },
+ "archives": [
+  {
+   "date": "2026-11-06",
+   "file": "algo/crypto-algo-2026-11-06.tar.gz.enc",
+   "created_at": "2026-11-06T11:34:52+08:00",
+   "file_count": 53,
+   "plain_bytes": 237139,
+   "cipher_bytes": 237171,
+   "plain_sha256": "753982ecabaf169a6ba0c4f1398a79a42ba20b303c7e0505778ab8257927d995",
+   "cipher_sha256": "ed4b1317c1026ba5c520797fa1065c5a6518193f6b36d9f942fcf6368285707b",
+   "key_id": "edd77dc4"
+  }
+ ]
+}
