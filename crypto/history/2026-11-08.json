@@ -1,0 +1,217 @@
+{
+ "schema_version": 1,
+ "generated_at": "2026-11-08T05:09:20+08:00",
+ "as_of_bar_utc": "2026-11-07 16:00:00",
+ "data_lag_bars": 0,
+ "strategy": {
+  "name": "加密趋势策略 v3.4",
+  "tier": "真实成本档 v3.4",
+  "pairs": [
+   "ETH",
+   "BTC",
+   "SOL",
+   "ADA"
+  ],
+  "timeframe": "4h",
+  "live_started": "2026-10-27 04:00:00",
+  "cost_model": {
+   "fee_pct_per_side": 0.05,
+   "slip_pct_per_side": 0.06,
+   "funding": "included"
+  }
+ },
+ "performance": {
+  "basis": "realized_live",
+  "index_base": 100.0,
+  "nav_index": 105.55,
+  "return_pct": 5.55,
+  "peak_index": 109.16,
+  "drawdown_pct": -3.31,
+  "closed_trades": 6,
+  "win_rate_pct": 50.0,
+  "sum_r": 1.95,
+  "avg_r": 0.32,
+  "note": "前瞻段真实纸面（已实现，不含浮动盈亏）；金额已脱敏为指数"
+ },
+ "equity_curve": [
+  {
+   "t": "2026-10-27 08:00:00",
+   "index": 100.0
+  },
+  {
+   "t": "2026-10-28 00:00:00",
+   "index": 96.71
+  },
+  {
+   "t": "2026-10-31 16:00:00",
+   "index": 102.78
+  },
+  {
+   "t": "2026-11-01 08:00:00",
+   "index": 108.38
+  },
+  {
+   "t": "2026-11-04 08:00:00",
+   "index": 108.16
+  },
+  {
+   "t": "2026-11-04 08:00:00",
+   "index": 109.16
+  },
+  {
+   "t": "2026-11-05 12:00:00",
+   "index": 105.55
+  }
+ ],
+ "equity_curve_consistent": true,
+ "positions": [],
+ "positions_replay_hidden": 0,
+ "positions_note": "只披露比值与价位，不披露数量、风险金额、名义头寸、保证金占用",
+ "recent_closed": [
+  {
+   "pair": "ETHUSDT",
+   "coin": "ETH",
+   "side": "long",
+   "pattern": "TF20-L",
+   "opened_at": "2026-11-04 12:00:00",
+   "closed_at": "2026-11-05 12:00:00",
+   "exit_reason": "stop",
+   "r": -1.1,
+   "pnl_pct": -3.31
+  },
+  {
+   "pair": "ADAUSDT",
+   "coin": "ADA",
+   "side": "short",
+   "pattern": "TF10-S",
+   "opened_at": "2026-11-01 20:00:00",
+   "closed_at": "2026-11-04 08:00:00",
+   "exit_reason": "trail",
+   "r": -0.07,
+   "pnl_pct": -0.2
+  },
+  {
+   "pair": "SOLUSDT",
+   "coin": "SOL",
+   "side": "short",
+   "pattern": "TF10-S",
+   "opened_at": "2026-11-01 16:00:00",
+   "closed_at": "2026-11-04 08:00:00",
+   "exit_reason": "trail",
+   "r": 0.31,
+   "pnl_pct": 0.93
+  },
+  {
+   "pair": "BTCUSDT",
+   "coin": "BTC",
+   "side": "short",
+   "pattern": "X50-S",
+   "opened_at": "2026-10-29 20:00:00",
+   "closed_at": "2026-11-01 08:00:00",
+   "exit_reason": "trail",
+   "r": 1.82,
+   "pnl_pct": 5.45
+  },
+  {
+   "pair": "ETHUSDT",
+   "coin": "ETH",
+   "side": "short",
+   "pattern": "X50-S",
+   "opened_at": "2026-10-29 00:00:00",
+   "closed_at": "2026-10-31 16:00:00",
+   "exit_reason": "trail",
+   "r": 2.09,
+   "pnl_pct": 6.28
+  },
+  {
+   "pair": "SOLUSDT",
+   "coin": "SOL",
+   "side": "short",
+   "pattern": "TF10-S",
+   "opened_at": "2026-10-27 08:00:00",
+   "closed_at": "2026-10-28 00:00:00",
+   "exit_reason": "stop",
+   "r": -1.1,
+   "pnl_pct": -3.29
+  }
+ ],
+ "market": [
+  {
+   "coin": "ETH",
+   "pair": "ETHUSDT",
+   "close": 2235.57,
+   "gap_ema200_pct": -6.04,
+   "atr_pct": 1.41,
+   "atr_rank": 0.33,
+   "er_rank": 0.302,
+   "dir": "bear",
+   "vol": "L",
+   "trend": "C",
+   "gate_pass": false,
+   "can_long": false,
+   "can_short": false
+  },
+  {
+   "coin": "BTC",
+   "pair": "BTCUSDT",
+   "close": 75805.19,
+   "gap_ema200_pct": -5.1,
+   "atr_pct": 1.09,
+   "atr_rank": 0.4,
+   "er_rank": 0.397,
+   "dir": "bear",
+   "vol": "M",
+   "trend": "N",
+   "gate_pass": false,
+   "can_long": false,
+   "can_short": false
+  },
+  {
+   "coin": "SOL",
+   "pair": "SOLUSDT",
+   "close": 89.64,
+   "gap_ema200_pct": -11.08,
+   "atr_pct": 1.71,
+   "atr_rank": 0.366,
+   "er_rank": 0.474,
+   "dir": "bear",
+   "vol": "M",
+   "trend": "T",
+   "gate_pass": true,
+   "can_long": false,
+   "can_short": true
+  },
+  {
+   "coin": "ADA",
+   "pair": "ADAUSDT",
+   "close": 0.1813,
+   "gap_ema200_pct": -13.36,
+   "atr_pct": 2.2,
+   "atr_rank": 0.409,
+   "er_rank": 0.368,
+   "dir": "bear",
+   "vol": "M",
+   "trend": "N",
+   "gate_pass": false,
+   "can_long": false,
+   "can_short": false
+  }
+ ],
+ "risk": {
+  "voltarget_pct": 55.0,
+  "dd_brake_threshold_pct": -20.0,
+  "dd_brake_mult": 0.5,
+  "dd_brake_active": false,
+  "high_vol_mult": 0.4,
+  "f_base_pct": 3.0,
+  "max_concurrent": 4,
+  "same_side_cap": 2,
+  "er_gate": 0.45
+ },
+ "replay_segment": {
+  "note": "引擎与回测口径校验用，非真实收益；复利倍数不可实现",
+  "closed": 971,
+  "multiple": 103.738
+ },
+ "alerts": []
+}
