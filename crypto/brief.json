@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
- "generated_at": "2026-11-11T22:01:15+08:00",
- "as_of_bar_utc": "2026-11-11 08:00:00",
+ "generated_at": "2026-11-12T02:20:58+08:00",
+ "as_of_bar_utc": "2026-11-11 12:00:00",
  "data_lag_bars": 0,
  "strategy": {
   "name": "加密趋势策略 v3.4",
@@ -23,14 +23,14 @@
  "performance": {
   "basis": "realized_live",
   "index_base": 100.0,
-  "nav_index": 105.55,
-  "return_pct": 5.55,
+  "nav_index": 102.19,
+  "return_pct": 2.19,
   "peak_index": 109.16,
-  "drawdown_pct": -3.31,
-  "closed_trades": 6,
-  "win_rate_pct": 50.0,
-  "sum_r": 1.95,
-  "avg_r": 0.32,
+  "drawdown_pct": -6.39,
+  "closed_trades": 7,
+  "win_rate_pct": 42.9,
+  "sum_r": 0.89,
+  "avg_r": 0.13,
   "note": "前瞻段真实纸面（已实现，不含浮动盈亏）；金额已脱敏为指数"
  },
  "equity_curve": [
@@ -61,24 +61,14 @@
   {
    "t": "2026-11-05 12:00:00",
    "index": 105.55
+  },
+  {
+   "t": "2026-11-11 12:00:00",
+   "index": 102.19
   }
  ],
  "equity_curve_consistent": true,
  "positions": [
-  {
-   "coin": "ADA",
-   "pair": "ADAUSDT",
-   "side": "short",
-   "pattern": "TF10-S",
-   "entry": 0.1729654,
-   "stop": 0.17923978571646093,
-   "stop_dist_pct": 3.63,
-   "lev_nominal": 27.6,
-   "lev_suggested": 10,
-   "r_now": -0.6,
-   "opened_at": "2026-11-10 16:00:00",
-   "segment": "live"
-  },
   {
    "coin": "BTC",
    "pair": "BTCUSDT",
@@ -97,6 +87,17 @@
  "positions_replay_hidden": 0,
  "positions_note": "只披露比值与价位，不披露数量、风险金额、名义头寸、保证金占用",
  "recent_closed": [
+  {
+   "pair": "ADAUSDT",
+   "coin": "ADA",
+   "side": "short",
+   "pattern": "TF10-S",
+   "opened_at": "2026-11-10 16:00:00",
+   "closed_at": "2026-11-11 12:00:00",
+   "exit_reason": "stop",
+   "r": -1.06,
+   "pnl_pct": -3.18
+  },
   {
    "pair": "ETHUSDT",
    "coin": "ETH",
@@ -168,11 +169,11 @@
   {
    "coin": "ETH",
    "pair": "ETHUSDT",
-   "close": 2057.13,
-   "gap_ema200_pct": -11.71,
-   "atr_pct": 1.72,
-   "atr_rank": 0.591,
-   "er_rank": 0.88,
+   "close": 2075.31,
+   "gap_ema200_pct": -10.84,
+   "atr_pct": 1.74,
+   "atr_rank": 0.606,
+   "er_rank": 0.817,
    "dir": "bear",
    "vol": "M",
    "trend": "T",
@@ -183,11 +184,11 @@
   {
    "coin": "BTC",
    "pair": "BTCUSDT",
-   "close": 73992.38,
-   "gap_ema200_pct": -6.18,
-   "atr_pct": 1.18,
-   "atr_rank": 0.511,
-   "er_rank": 0.571,
+   "close": 73991.97,
+   "gap_ema200_pct": -6.12,
+   "atr_pct": 1.2,
+   "atr_rank": 0.531,
+   "er_rank": 0.524,
    "dir": "bear",
    "vol": "M",
    "trend": "T",
@@ -198,11 +199,11 @@
   {
    "coin": "SOL",
    "pair": "SOLUSDT",
-   "close": 83.96,
-   "gap_ema200_pct": -14.26,
-   "atr_pct": 1.93,
-   "atr_rank": 0.557,
-   "er_rank": 0.796,
+   "close": 84.85,
+   "gap_ema200_pct": -13.24,
+   "atr_pct": 1.92,
+   "atr_rank": 0.556,
+   "er_rank": 0.674,
    "dir": "bear",
    "vol": "M",
    "trend": "T",
@@ -213,14 +214,14 @@
   {
    "coin": "ADA",
    "pair": "ADAUSDT",
-   "close": 0.1767,
-   "gap_ema200_pct": -12.94,
-   "atr_pct": 2.14,
-   "atr_rank": 0.374,
-   "er_rank": 0.441,
+   "close": 0.1786,
+   "gap_ema200_pct": -11.9,
+   "atr_pct": 2.19,
+   "atr_rank": 0.405,
+   "er_rank": 0.189,
    "dir": "bear",
    "vol": "M",
-   "trend": "N",
+   "trend": "C",
    "gate_pass": false,
    "can_long": false,
    "can_short": false

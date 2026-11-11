@@ -36,9 +36,9 @@
  },
  {
   "date": "2026-11-11",
-  "as_of_bar_utc": "2026-11-11 08:00:00",
-  "nav_index": 105.55,
-  "return_pct": 5.55,
-  "drawdown_pct": -3.31
+  "as_of_bar_utc": "2026-11-11 12:00:00",
+  "nav_index": 102.19,
+  "return_pct": 2.19,
+  "drawdown_pct": -6.39
  }
 ]
